@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request
+from flask import Flask, render_template, request, flash
 from flask_cors import CORS, cross_origin
 import requests
 from bs4 import BeautifulSoup as bs
@@ -9,15 +9,22 @@ from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
 import os
 from dotenv import load_dotenv
+import time
 
 # Load environment variables
 load_dotenv()
 
 # Configure logging
-logging.basicConfig(filename="scrapper.log", level=logging.INFO)
+logging.basicConfig(
+    filename="scrapper.log",
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 app = Flask(__name__)
 CORS(app)
+# Required for flash messages
+app.secret_key = os.getenv('SECRET_KEY', 'your-secret-key-here')
 
 # MongoDB configuration
 MONGODB_URI = os.getenv(
@@ -34,12 +41,20 @@ def index():
     if request.method == 'POST':
         try:
             searchString = request.form['content'].replace(" ", "")
+            if not searchString:
+                flash('Please enter a search term')
+                return render_template('index.html')
+
             flipkart_url = "https://www.flipkart.com/search?q=" + searchString
+            logging.info(f"Searching for: {searchString}")
 
             # Add headers to mimic browser request
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
             }
+
+            # Add delay to avoid rate limiting
+            time.sleep(1)
 
             uClient = uReq(flipkart_url)
             flipkartPage = uClient.read()
@@ -49,16 +64,18 @@ def index():
             bigboxes = flipkart_html.find_all("div", {"class": "_75nlfW"})
 
             if len(bigboxes) <= 3:
-                logging.info(
-                    "Not enough product boxes found. Length: {}".format(len(bigboxes)))
-                return "No products found or page layout has changed."
+                logging.warning(
+                    f"Not enough product boxes found. Length: {len(bigboxes)}")
+                flash('No products found or page layout has changed.')
+                return render_template('index.html')
 
             del bigboxes[0:3]
 
             if not bigboxes:
-                logging.info(
+                logging.warning(
                     "No product box found after deleting first 3 items.")
-                return "No products found. Try another search keyword."
+                flash('No products found. Try another search keyword.')
+                return render_template('index.html')
 
             box = bigboxes[1]
 
@@ -68,6 +85,11 @@ def index():
             prod_html = bs(prodRes.text, "html.parser")
 
             commentboxes = prod_html.find_all('div', {'class': "RcXBOT"})
+
+            if not commentboxes:
+                logging.warning("No reviews found for the product.")
+                flash('No reviews found for this product.')
+                return render_template('index.html')
 
             filename = searchString + ".csv"
             with open(filename, "w", encoding='utf-8') as fw:
@@ -115,7 +137,7 @@ def index():
                     fw.write(
                         f"{searchString}, {name}, {rating}, {commentHead}, {custComment}\n")
 
-            logging.info("Final reviews: {}".format(reviews))
+            logging.info(f"Successfully scraped {len(reviews)} reviews")
 
             # MongoDB connection with error handling
             try:
@@ -124,6 +146,7 @@ def index():
                 review_col = db['review_scrap_data']
                 review_col.insert_many(reviews)
                 client.close()
+                logging.info("Successfully saved to MongoDB")
             except Exception as e:
                 logging.error(f"MongoDB Error: {str(e)}")
                 # Continue even if MongoDB fails - at least we have the CSV
@@ -131,8 +154,9 @@ def index():
             return render_template('result.html', reviews=reviews)
 
         except Exception as e:
-            logging.error("Exception occurred", exc_info=True)
-            return 'Something went wrong. Please try again.'
+            logging.error(f"Exception occurred: {str(e)}", exc_info=True)
+            flash('Something went wrong. Please try again.')
+            return render_template('index.html')
     else:
         return render_template('index.html')
 
